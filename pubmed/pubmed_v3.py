@@ -89,7 +89,7 @@ class ThreadCrawl(threading.Thread):
                     except Exception as e:
                         logger.error('跳转详情页失败:{}'.format(e))
                 else:
-                    logger.debug('论文pmid:{}不支持下载'.format(article['PMID']))
+                    logger.debug('论文pmid:{}不支持下载,地址:{}'.format(article['PMID'], host + '/{}'.format(article['PMID'])))
             except Exception as e:
                 print('craw error {}'.format(e))
 
@@ -126,7 +126,6 @@ class ThreadParse(threading.Thread):
             try:
                 data = self.data_queue.get(False)
                 self.parse(data)
-                self.data_queue.task_done()
             except Exception as e:
                 logger.error('解析失败:{}'.format(e))
 
@@ -144,13 +143,14 @@ class ThreadParse(threading.Thread):
             self.download(pmid, download_host + file_url)
             # print("id:{} v:{}".format(pmid, download_host + file_url))
         except Exception as e:
-            logger.error('跳转下载页失败:{}'.format(e))
+            logger.error('跳转下载页失败error:{}'.format(e))
 
     def download(self, pmid, url):
         file_name = pmid + '.pdf'
         file_path = os.path.join('download', file_name)
         if os.path.isfile(file_path):
             return True  # 已经下载过该文件，跳过
+        logger.info('准备下载论文pmid:{},下载地址:{}'.format(pmid, url))
         with closing(requests.get(url, stream=True, headers=headers, timeout=120, verify=False)) as r:
             r_code = r.status_code
             if r_code in (200, 299):
@@ -175,6 +175,7 @@ def main():
     try:
         new_query_url = query_url + '&size={}'.format(max_size)
         logger.info(new_query_url)
+        logger.info('正在检索链接...')
         response = requests.get(new_query_url, headers=headers, timeout=60, verify=False)
         html = etree.HTML(response.text)
         results = html.xpath('//div[@class="search-results-chunk results-chunk"]/article')
