@@ -15,6 +15,9 @@ from queue import Queue
 from lxml import etree
 from urllib import parse
 from contextlib import closing
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 file_queue = Queue()
 article_queue = Queue()
@@ -70,19 +73,19 @@ def download(file_name, file_url):
 
 
 def parser_loop():
-    while True:
-        if not article_queue.empty():
-            break
+    while not article_queue.empty():
         article = article_queue.get()
         print(article['PMID'])
         if article['is_free_resources']:
             try:
                 print('enter parser')
                 response = session.get(host + '/{}'.format(article['PMID']), headers=headers, verify=False)
-                html = etree.HTML(response.text)
+                time.sleep(0.1)
+                html = etree.HTML(response.content)
                 file_download_page_url = html.xpath('//span[@class="identifier pmc"]/a/@href')[0]  # PMCID
                 response_download_page = session.get(file_download_page_url, headers=headers, verify=False)
-                html_download_page = etree.HTML(response_download_page.text)
+                time.sleep(0.1)
+                html_download_page = etree.HTML(response_download_page.content)
                 # file_url = html_download_page.xpath('//a[@id="jr-pdf-sw"]/@href')[0]
                 file_url = html_download_page.xpath('//div[@id="rightcolumn"]/div[2]/div/ul/li[4]/a/@href')[0]
                 print("id:{} v:{}".format(article['PMID'], file_url))
@@ -93,14 +96,13 @@ def parser_loop():
 
 
 def download_loop():
-    while True:
-        if not file_queue.empty():
-            break
+    while not file_queue.empty():
         file_dict = file_queue.get()
         (file_name, file_url), = file_dict.items()
         try:
+            file_name = file_name + '.pdf'
             logger.info('start download {}.pdf:{}'.format(file_name, file_url))
-            download(file_name + '.pdf', file_url)
+            download(file_name, file_url)
             logger.info('download {}.pdf success'.format(file_name))
         except Exception as e:
             logger.error('download {} failed {}'.format(file_name, e))
@@ -147,13 +149,13 @@ def pubmed_spider():
                 "is_free_resources": is_free_resources,
             })
         print('article_queue:{}'.format(article_queue.qsize()))
-        print(article_queue.get()['PMID'])
 
         if download_flag:
             logger.info('获取下载链接...')
-            parser_thread = threading.Thread(target=parser_loop, )
-            parser_thread.start()
-            parser_thread.join()
+            for i in range(int(thread_num)):
+                parser_thread = threading.Thread(target=parser_loop, )
+                parser_thread.start()
+                parser_thread.join()
 
             threads = []
             for i in range(int(thread_num)):
@@ -162,17 +164,10 @@ def pubmed_spider():
                 threads.append(download_thread)
             for t in threads:
                 t.join()
-
-        if file_queue.empty():
             logger.info('下载完成')
+
     except Exception as e:
         logger.error('解析失败:{}'.format(e))
-
-
-class ThreadCrawl(threading.Thread):
-    def __init__(self, queue):
-        super(ThreadCrawl, self).__init__()
-        self.queue = queue
 
 
 if __name__ == '__main__':
