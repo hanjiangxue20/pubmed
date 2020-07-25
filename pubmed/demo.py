@@ -2,6 +2,7 @@
 # @Author   : chengnian920@gmail.com
 # @Time     : 2020/7/19 11:09
 # @File     : demo.py
+import os
 import time
 import requests
 from lxml import etree
@@ -36,5 +37,8 @@ res = session.post('https://pubmed.ncbi.nlm.nih.gov/more/',
                    cookies=cookiedict,
                    verify=False)
 
-print(res.text)
-print(res.status_code)
+# print(res.text)
+# print(res.status_code)
+
+
+print(os.path.exists(os.path.join('download','32376397.pdf')))

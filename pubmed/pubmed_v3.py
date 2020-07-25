@@ -3,11 +3,11 @@
 # @Time     : 2020/7/16 21:52
 # @File     : pubmed.py
 import random
-
 import requests
 import json
 import time
 import os
+import csv
 import logging
 from logging.handlers import TimedRotatingFileHandler
 import configparser
@@ -34,7 +34,6 @@ PARSE_EXIT = False
 user_agent_list = [
     "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/68.0.3440.106 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/67.0.3396.99 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; …) Gecko/20100101 Firefox/61.0",
     "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/64.0.3282.186 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/62.0.3202.62 Safari/537.36",
     "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/45.0.2454.101 Safari/537.36",
@@ -78,12 +77,13 @@ class ThreadCrawl(threading.Thread):
                 break
             try:
                 article = self.search_queue.get(False)
+                if self.is_file_exist(article['PMID']):  # 已经下载过该文件，跳过
+                    continue
                 if article['is_free_resources']:
                     try:
-                        # 文章详情页
                         logger.info(host + '/{}'.format(article['PMID']))
                         response = requests.get(host + '/{}'.format(article['PMID']), headers=headers, timeout=60,
-                                                verify=False)
+                                                verify=False)  # 文章详情页
                         time.sleep(0.1)
                         self.data_queue.put({article['PMID']: response.content})
                     except Exception as e:
@@ -91,31 +91,24 @@ class ThreadCrawl(threading.Thread):
                 else:
                     logger.debug('论文pmid:{}不支持下载,地址:{}'.format(article['PMID'], host + '/{}'.format(article['PMID'])))
             except Exception as e:
-                print('craw error {}'.format(e))
+                logger.error('craw error {}'.format(e))
 
-    def get_file_url(self):
-        article = self.search_queue.get(False)
-        if article['is_free_resources']:
-            try:
-                response = requests.get(host + '/{}'.format(article['PMID']), headers=headers, verify=False)
-                html = etree.HTML(response.text)
-                file_download_page_url = html.xpath('//span[@class="identifier pmc"]/a/@href')[0]  # PMCID链接
-                response_download_page = requests.get(file_download_page_url, headers=headers, verify=False)
-                html_download_page = etree.HTML(response_download_page.text)
-                file_url = html_download_page.xpath('//a[@id="jr-pdf-sw"]/@href')[0]
-                self.data_queue.put({article['PMID']: download_host + file_url})
-                # print("id:{} v:{}".format(article['PMID'], download_host + file_url))
-            except Exception as e:
-                logger.error('跳转下载页失败:{}'.format(e))
+    @staticmethod
+    def save_result_to_csv(article):
+        pass
+
+    @staticmethod
+    def is_file_exist(pmid):
+        return os.path.exists(os.path.join("download", pmid + '.pdf'))
 
 
 class ThreadParse(threading.Thread):
-    def __init__(self, data_queue, filename, lock):
+    def __init__(self, data_queue, output_csv, lock):
         super(ThreadParse, self).__init__()
         # 数据队列
         self.data_queue = data_queue
         # 保存解析后数据的文件名
-        self.filename = filename
+        self.output_csv = output_csv
         # 锁
         self.lock = lock
 
@@ -124,6 +117,7 @@ class ThreadParse(threading.Thread):
             if self.data_queue.empty():
                 break
             try:
+                logger.info('剩余下载{}个文件，请稍后...'.format(self.data_queue.qsize()))
                 data = self.data_queue.get(False)
                 self.parse(data)
             except Exception as e:
@@ -143,20 +137,19 @@ class ThreadParse(threading.Thread):
             self.download(pmid, download_host + file_url)
             # print("id:{} v:{}".format(pmid, download_host + file_url))
         except Exception as e:
-            logger.error('跳转下载页失败error:{}'.format(e))
+            logger.error('pmid:{}跳转下载页失败error:{}'.format(pmid, e))
 
     def download(self, pmid, url):
         file_name = pmid + '.pdf'
         file_path = os.path.join('download', file_name)
-        if os.path.isfile(file_path):
-            return True  # 已经下载过该文件，跳过
         logger.info('准备下载论文pmid:{},下载地址:{}'.format(pmid, url))
-        with closing(requests.get(url, stream=True, headers=headers, timeout=120, verify=False)) as r:
+        with closing(requests.get(url, stream=True, headers=headers, timeout=600, verify=False)) as r:
+            time.sleep(0.1)
             r_code = r.status_code
             if r_code in (200, 299):
                 try:
                     with open(file_path, 'wb') as f:
-                        for data in r.iter_content(1024):
+                        for data in r.iter_content(1024 * 1024):
                             # data = r.content
                             f.write(data)
                     logger.info('下载论文{}成功'.format(file_name))
@@ -172,11 +165,18 @@ def main():
     search_queue = Queue()
     data_queue = Queue()
     lock = threading.Lock()
+    # output_csv = open('csv_article_' + time.strftime('%m%d%H%M%S', time.localtime()) + '.csv', 'w')
+    output_csv=''
+    # writer = csv.writer(output_csv)
+    # writer.writerow(
+    #     ["PMID", "Title", "Authors", "Citation", "First Author", "Journal/Book", "Publication Year", "status"])
+
     try:
         new_query_url = query_url + '&size={}'.format(max_size)
         logger.info(new_query_url)
         logger.info('正在检索链接...')
-        response = requests.get(new_query_url, headers=headers, timeout=60, verify=False)
+        response = requests.get(new_query_url, headers=headers, timeout=120, verify=False)
+        time.sleep(0.1)
         html = etree.HTML(response.text)
         results = html.xpath('//div[@class="search-results-chunk results-chunk"]/article')
     except Exception as e:
@@ -185,30 +185,30 @@ def main():
     try:
         logger.info('总共查询到{}条记录！'.format(len(results)))
         for r in results:
-            ref = r.xpath('.//a[@class="docsum-title"]/@ref')[0]
-            data_full_article_url = r.xpath('.//a[@class="docsum-title"]/@data-full-article-url')[0]
             data_article_id = r.xpath('.//a[@class="docsum-title"]/@data-article-id')[0]
-            title = (''.join(r.xpath('.//a[@class="docsum-title"]//text()'))).strip()
-            authors = ''.join(r.xpath('.//span[@class="docsum-authors full-authors"]//text()'))
-            full_journal_citation = ''.join(
-                r.xpath('.//span[@class="docsum-journal-citation full-journal-citation"]//text()'))
-            short_journal_citation = ''.join(
-                r.xpath('.//span[@class="docsum-journal-citation short-journal-citation"]//text()'))
-            journal_or_book, publication_year, _ = short_journal_citation.split('.')
+            # title = (''.join(r.xpath('.//a[@class="docsum-title"]//text()'))).strip()
+            # authors = ''.join(r.xpath('.//span[@class="docsum-authors full-authors"]//text()'))
+            # first_author = authors.split(',')[0]
+            # full_journal_citation = ''.join(
+            #     r.xpath('.//span[@class="docsum-journal-citation full-journal-citation"]//text()'))
+            # short_journal_citation = ''.join(
+            #     r.xpath('.//span[@class="docsum-journal-citation short-journal-citation"]//text()'))
+            # journal_or_book, publication_year, _ = short_journal_citation.split('.')
+            # publication_year = publication_year.split()[0]
             free_resources = r.xpath('.//span[@class="free-resources spaced-citation-item citation-part"]/text()')
             is_free_resources = True if free_resources else False
+
             result = {
                 "PMID": data_article_id,
-                "title": title,
-                "authors": authors,
-                "citation": full_journal_citation,
-                "first_author": authors.split(',')[0],
-                "journal_or_book": journal_or_book,
-                "publication_year": publication_year.split()[0],
-                "ref": ref,
-                "data_full_article_url": data_full_article_url,
+                # "title": title,
+                # "authors": authors,
+                # "citation": full_journal_citation,
+                # "first_author": first_author,
+                # "journal_or_book": journal_or_book,
+                # "publication_year": publication_year,
                 "is_free_resources": is_free_resources,
             }
+            print(result)
             search_queue.put(result)
         threadcrawl = []
         for i in range(int(thread_num)):
@@ -222,7 +222,7 @@ def main():
         logger.info("获取下载地址成功,准备下载...")
         threadparse = []
         for i in range(int(thread_num)):
-            thread = ThreadParse(data_queue, 'demo', lock)
+            thread = ThreadParse(data_queue, output_csv, lock)
             thread.start()
             threadparse.append(thread)
 
