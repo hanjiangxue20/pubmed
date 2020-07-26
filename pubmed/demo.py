@@ -2,6 +2,7 @@
 # @Author   : chengnian920@gmail.com
 # @Time     : 2020/7/19 11:09
 # @File     : demo.py
+import csv
 import os
 import time
 import requests
@@ -40,5 +41,37 @@ res = session.post('https://pubmed.ncbi.nlm.nih.gov/more/',
 # print(res.text)
 # print(res.status_code)
 
+path = 'csv_article_' + time.strftime('%m%d%H%M%S', time.localtime()) + '.csv'
 
-print(os.path.exists(os.path.join('download','32376397.pdf')))
+
+def csv_dict_write(path, head=None, data=None):
+    with open(path, 'a', encoding='utf-8', newline='') as f:
+        writer = csv.DictWriter(f, head)
+        writer.writeheader()
+        writer.writerows(data)
+        return True
+
+
+head = ['Name', 'Age']
+
+data = [
+    {'Name': 'Keys', 'Age': 28},
+    {'Name': 'HongPing', 'Age': 29},
+    {'Name': 'WenChao', 'Age': 15}
+]
+
+data1 = [
+    {'Name': 'Keys1', 'Age': 28},
+    {'Name': 'HongPing1', 'Age': 29},
+    {'Name': 'WenChao1', 'Age': 15}
+]
+
+f = open(path, 'a', encoding='utf-8', newline='')
+writer = csv.DictWriter(f, head)
+writer.writeheader()
+for d in data:
+    writer.writerow(d)
+
+for d in data1:
+    writer.writerow(d)
+print('end')

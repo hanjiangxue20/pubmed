@@ -12,7 +12,6 @@ import logging
 from logging.handlers import TimedRotatingFileHandler
 import configparser
 import threading
-# import pandas as pd
 from queue import Queue
 from lxml import etree
 from contextlib import closing
@@ -25,11 +24,9 @@ cf.read('config.ini', encoding="utf-8")
 query_url = cf.get('Pubmed', 'query_url')
 max_size = cf.get('Pubmed', 'max_size')
 host = cf.get('Pubmed', 'host')
-download_flag = cf.get('Pubmed', 'download_flag')
 download_host = cf.get('Pubmed', 'download_host')
 thread_num = cf.get('Pubmed', 'thread_num')
-CRAWL_EXIT = False
-PARSE_EXIT = False
+is_output_csv = cf.get('Pubmed', 'is_output_csv')
 
 user_agent_list = [
     "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/68.0.3440.106 Safari/537.36",
@@ -63,12 +60,14 @@ logger.addHandler(handler_console)
 
 class ThreadCrawl(threading.Thread):
     def __init__(self, search_queue, data_queue):
+        """
+        构造爬取线程
+        :param search_queue: 搜索结果队列
+        :param data_queue: 数据队列
+        """
         super(ThreadCrawl, self).__init__()
-        # 搜索结果队列
         self.search_queue = search_queue
-        # 数据队列
         self.data_queue = data_queue
-        # 请求报头
         self.headers = headers
 
     def run(self):
@@ -79,9 +78,9 @@ class ThreadCrawl(threading.Thread):
                 article = self.search_queue.get(False)
                 if self.is_file_exist(article['PMID']):  # 已经下载过该文件，跳过
                     continue
-                if article['is_free_resources']:
+                if article['Is_free_resources']:
                     try:
-                        response = requests.get(host + '/{}'.format(article['PMID']), headers=headers, timeout=120,
+                        response = requests.get(host + '/{}'.format(article['PMID']), headers=self.headers, timeout=120,
                                                 verify=False)  # 文章详情页
                         time.sleep(0.1)
                         self.data_queue.put({article['PMID']: response})
@@ -90,7 +89,7 @@ class ThreadCrawl(threading.Thread):
                 else:
                     logger.info('论文pmid:{}不支持下载,地址:{}'.format(article['PMID'], host + '/{}'.format(article['PMID'])))
             except Exception as e:
-                logger.error('craw error {}'.format(e))
+                logger.error('爬取异常：{}'.format(e))
 
     @staticmethod
     def save_result_to_csv(article):
@@ -103,13 +102,17 @@ class ThreadCrawl(threading.Thread):
 
 class ThreadParse(threading.Thread):
     def __init__(self, data_queue, output_csv, lock):
+        """
+        构造解析线程
+        :param data_queue: 数据队列
+        :param output_csv: 结果输出csv
+        :param lock: 锁
+        """
         super(ThreadParse, self).__init__()
-        # 数据队列
         self.data_queue = data_queue
-        # 保存解析后数据的文件名
         self.output_csv = output_csv
-        # 锁
         self.lock = lock
+        self.headers = headers
 
     def run(self):
         while True:
@@ -122,30 +125,57 @@ class ThreadParse(threading.Thread):
                 logger.error('解析失败:{}'.format(e))
 
     def parse(self, data):
+        """
+        解析html
+        :param data: http response
+        :return:
+        """
         (pmid, response), = data.items()
         html = etree.HTML(response.content)
         try:
-            file_download_page_url = html.xpath('//span[@class="identifier pmc"]/a/@href')  # PMCID链接
-            logger.info('file_download_page_url:  pmid:{} url:{}'.format(pmid, file_download_page_url))
-            if not file_download_page_url:
-                logger.info('获取pmid:{}下载地址超时，请去页面:{}手动下载！'.format(pmid, response.url))
+            full_text_links_list = html.xpath('//div[@class="full-view"]//div[@class="full-text-links-list"]/a')
+            link = full_text_links_list[-1]
+            if link.xpath('@data-ga-action="PMC"'):  # 优先选择PMC下载地址
+                file_download_page_url = link.xpath('@href')[0]
+                logger.info('pmid:{} PMC下载页面：{}'.format(pmid, file_download_page_url))
+                response_download_page = requests.get(file_download_page_url, headers=self.headers, timeout=300,
+                                                      verify=False)
+                html_download_page = etree.HTML(response_download_page.content)
+                file_url = html_download_page.xpath('//div[@id="rightcolumn"]/div[2]/div/ul/li[4]/a/@href')[0]
+                self.download(pmid, download_host + file_url)
+                return True
+            elif link.xpath('@data-ga-action="Elsevier Science"'):  # Elsevier Science
+                file_download_page_url = link.xpath('@href')[0]
+                logger.info('pmid:{}  Elsevier Science下载页面：{}'.format(pmid, file_download_page_url))
+                pass  # todo  针对非PMC站点文章，获取下载地址url情况比较多，暂时没有处理非PMC站点文章
+            elif link.xpath('@data-ga-action="Ediciones Doyma, S.L."'):  # Ediciones Doyma, S.L.
+                file_download_page_url = link.xpath('@href')[0]
+                logger.info('pmid:{} Ediciones Doyma, S.L. 下载页面：{}'.format(pmid, file_download_page_url))
+                pass
+            elif link.xpath('@data-ga-action="Publishing M2Community"'):  # Publishing M2Community
+                file_download_page_url = link.xpath('@href')[0]
+                doi = file_download_page_url.split('/')[-1]
+                url = 'https://www.e-ce.org/upload/pdf/' + doi.replace('.', '-') + '.pdf'
+                logger.info('pmid:{} Publishing M2Community下载页面：{} 地址：{}'.format(pmid, file_download_page_url, url))
+                # self.download(pmid, url)  # todo  服务器url地址通用性不太好，没有使用
+            else:
+                file_download_page_url = link.xpath('@href')[0]
+                logger.info('pmid:{}非PMC站点请手动下载：{} 下载地址：{}'.format(pmid, response.url, file_download_page_url))
                 return False
-            logger.info('pmid:{} 下载页面地址:{}'.format(pmid, file_download_page_url[0]))
-            response_download_page = requests.get(file_download_page_url[0], headers=headers, timeout=300, verify=False)
-            # time.sleep(0.1)
-            html_download_page = etree.HTML(response_download_page.content)
-            # file_url = html_download_page.xpath('//a[@id="jr-pdf-sw"]/@href')[0]
-            file_url = html_download_page.xpath('//div[@id="rightcolumn"]/div[2]/div/ul/li[4]/a/@href')[0]
-            self.download(pmid, download_host + file_url)
-            # print("id:{} v:{}".format(pmid, download_host + file_url))
         except Exception as e:
-            logger.error('pmid:{}跳转下载页失败error:{}'.format(pmid, e))
+            logger.error('pmid:{}跳转下载页失败:{}'.format(pmid, e))
 
     def download(self, pmid, url):
+        """
+        下载文件
+        :param pmid: pmid
+        :param url: 下载地址url
+        :return:
+        """
         file_name = pmid + '.pdf'
         file_path = os.path.join('download', file_name)
         logger.info('准备下载论文pmid:{},下载地址:{}'.format(pmid, url))
-        with closing(requests.get(url, stream=True, headers=headers, timeout=600, verify=False)) as r:
+        with closing(requests.get(url, stream=True, headers=self.headers, timeout=600, verify=False)) as r:
             time.sleep(0.1)
             r_code = r.status_code
             if r_code in (200, 299):
@@ -159,7 +189,7 @@ class ThreadParse(threading.Thread):
                 except Exception as e:
                     logger.error('保存论文{}失败，原因{}'.format(file_name, e))
             else:
-                logger.info('下载{}时服务器响应错误'.format(file_name))
+                logger.warning('下载{}时服务器响应错误'.format(file_name))
                 return False
 
 
@@ -167,11 +197,14 @@ def main():
     search_queue = Queue()
     data_queue = Queue()
     lock = threading.Lock()
-    # output_csv = open('csv_article_' + time.strftime('%m%d%H%M%S', time.localtime()) + '.csv', 'w')
     output_csv = ''
-    # writer = csv.writer(output_csv)
-    # writer.writerow(
-    #     ["PMID", "Title", "Authors", "Citation", "First Author", "Journal/Book", "Publication Year", "status"])
+    if is_output_csv == 'yes':
+        output_file = 'csv_article_' + time.strftime('%m%d%H%M%S', time.localtime()) + '.csv'
+        f = open(output_file, 'a', encoding='utf-8', newline='')
+        head = ["PMID", "Title", "Authors", "Citation", "First_author", "Journal_or_book", "Publication_year",
+                "Is_free_resources"]
+        writer = csv.DictWriter(f, head)
+        writer.writeheader()
 
     try:
         new_query_url = query_url + '&size={}'.format(max_size)
@@ -202,15 +235,17 @@ def main():
 
             result = {
                 "PMID": data_article_id,
-                "title": title,
-                "authors": authors,
-                "citation": full_journal_citation,
-                "first_author": first_author,
-                "journal_or_book": journal_or_book,
-                "publication_year": publication_year,
-                "is_free_resources": is_free_resources,
+                "Title": title,
+                "Authors": authors,
+                "Citation": full_journal_citation,
+                "First_author": first_author,
+                "Journal_or_book": journal_or_book,
+                "Publication_year": publication_year,
+                "Is_free_resources": is_free_resources,
             }
             search_queue.put(result)
+            if is_output_csv == 'yes':
+                writer.writerow(result)
         threadcrawl = []
         for i in range(int(thread_num)):
             thread = ThreadCrawl(search_queue, data_queue)
@@ -229,7 +264,7 @@ def main():
 
         for thread in threadparse:
             thread.join()
-        logger.info('文件下载执行完成！请到{}路径下查看。'.format(os.path.abspath('download')))
+        logger.info('文件下载执行完成！请到{}路径下查看!'.format(os.path.abspath('download')))
 
     except Exception as e:
         logger.error('解析失败:{}'.format(e))
