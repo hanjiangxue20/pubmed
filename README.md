@@ -1,5 +1,6 @@
 # pubmed
 **功能说明**：自动下载pubmed文章脚本，默认下载前200篇，暂时只支持PMC站点文章下载。
+仅作为学习自用，请不要用作其他途径。
 
 
 
@@ -35,7 +36,7 @@ pip install -i https://pypi.tuna.tsinghua.edu.cn/simple requests  lxml  urllib3
 
 复制搜索链接：
 
-![img](C:\Users\Nian\Documents\微信截图_20200817220659.png)
+![img](C:\Users\Nian\Documents\20200817220659.png)
 
 执行：
 
