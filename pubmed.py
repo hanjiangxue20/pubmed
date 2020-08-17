@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # @Author   : chengnian920@gmail.com
-# @Time     : 2020/7/16 21:52
+# @Time     : 2020/7/18 21:52
 # @File     : pubmed.py
 import random
 import requests
@@ -8,12 +8,12 @@ import time
 import os
 import csv
 import logging
-from logging.handlers import TimedRotatingFileHandler
 import configparser
 import threading
 from queue import Queue
 from lxml import etree
 from contextlib import closing
+from logging.handlers import TimedRotatingFileHandler
 import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -23,7 +23,8 @@ cf.read('config.ini', encoding="utf-8")
 max_size = cf.get('Pubmed', 'max_size')
 host = cf.get('Pubmed', 'host')
 download_host = cf.get('Pubmed', 'download_host')
-thread_num = cf.get('Pubmed', 'thread_num')
+thread_num = int(cf.get('Pubmed', 'thread_num'))
+timeout = int(cf.get('Pubmed', 'timeout'))
 is_output_csv = cf.get('Pubmed', 'is_output_csv')
 
 user_agent_list = [
@@ -35,7 +36,6 @@ user_agent_list = [
     "Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 6.0)",
     "Mozilla/5.0 (Macintosh; U; PPC Mac OS X 10.5; en-US; rv:1.9.2.15) Gecko/20110303 Firefox/3.6.15",
 ]
-headers = {'User-Agent': random.choice(user_agent_list), }
 
 if not os.path.exists('download'):
     os.mkdir('download')
@@ -66,7 +66,7 @@ class ThreadCrawl(threading.Thread):
         super(ThreadCrawl, self).__init__()
         self.search_queue = search_queue
         self.data_queue = data_queue
-        self.headers = headers
+        self.headers = {'User-Agent': random.choice(user_agent_list), }
 
     def run(self):
         while True:
@@ -78,13 +78,13 @@ class ThreadCrawl(threading.Thread):
                     continue
                 if article['Is_free_resources']:
                     try:
-                        response = requests.get(host + '/{}'.format(article['PMID']), headers=self.headers, timeout=120,
+                        response = requests.get(host + '/{}'.format(article['PMID']), headers=self.headers,
+                                                timeout=timeout,
                                                 verify=False)  # 文章详情页
                         self.data_queue.put({article['PMID']: response})
                     except Exception as e:
                         logger.error('pmid:{}跳转详情页失败:{}'.format(article['PMID'], e))
                 else:
-                    pass
                     logger.info('论文pmid:{}不支持下载,地址:{}'.format(article['PMID'], host + '/{}'.format(article['PMID'])))
             except Exception as e:
                 logger.error('爬取异常：{}'.format(e))
@@ -106,14 +106,14 @@ class ThreadParse(threading.Thread):
         self.data_queue = data_queue
         self.output_csv = output_csv
         self.lock = lock
-        self.headers = headers
+        self.headers = {'User-Agent': random.choice(user_agent_list), }
 
     def run(self):
         while True:
             if self.data_queue.empty():
                 break
             try:
-                data = self.data_queue.get(False, timeout=30)
+                data = self.data_queue.get(False)
                 self.parse(data)
             except Exception as e:
                 logger.error('解析失败:{}'.format(e))
@@ -132,7 +132,7 @@ class ThreadParse(threading.Thread):
                 link = full_text_links_list[-1]
                 if link.xpath('@data-ga-action="PMC"'):  # 优先选择PMC下载地址
                     file_download_page_url = link.xpath('@href')[0]
-                    response_download_page = requests.get(file_download_page_url, headers=self.headers, timeout=300,
+                    response_download_page = requests.get(file_download_page_url, headers=self.headers, timeout=timeout,
                                                           verify=False)
                     time.sleep(random.randint(1, 5) * 0.1)
                     html_download_page = etree.HTML(response_download_page.content)
@@ -173,7 +173,8 @@ class ThreadParse(threading.Thread):
         file_name = pmid + '.pdf'
         file_path = os.path.join('download', file_name)
         logger.info('准备下载论文pmid:{},下载地址:{}'.format(pmid, url))
-        with closing(requests.get(url, stream=True, headers=self.headers, timeout=600, verify=False)) as r:
+        self.headers = {'User-Agent': random.choice(user_agent_list), }
+        with closing(requests.get(url, stream=True, headers=self.headers, timeout=timeout + 300, verify=False)) as r:
             if r.status_code in (200, 299):
                 try:
                     with open(file_path, 'wb') as f:
@@ -204,14 +205,12 @@ def main(query_url_input=None):
     lock = threading.Lock()
     output_csv = ''
     if is_output_csv == 'yes':
-        output_file = os.path.abspath(
-            os.path.join('download', 'article_' + time.strftime('%m%d%H%M%S', time.localtime()) + '.csv'))
+        output_file = 'article_' + time.strftime('%m%d%H%M%S', time.localtime()) + '.csv'
         f = open(output_file, 'a', encoding='utf-8', newline='')
         head = ["PMID", "Title", "Authors", "Citation", "First_author", "Journal_or_book", "Publication_year",
                 "Is_free_resources"]
         writer = csv.DictWriter(f, head)
         writer.writeheader()
-
     try:
         if query_url_input:
             query_url = query_url_input
@@ -220,7 +219,8 @@ def main(query_url_input=None):
         new_query_url = query_url + '&size={}'.format(max_size)
         logger.info('检索地址：{}'.format(new_query_url))
         logger.info('正在检索链接...')
-        response = requests.get(new_query_url, headers=headers, timeout=300, verify=False)
+        headers = {'User-Agent': random.choice(user_agent_list), }
+        response = requests.get(new_query_url, headers=headers, timeout=timeout, verify=False)
         html = etree.HTML(response.text)
         results = html.xpath('//div[@class="search-results-chunk results-chunk"]/article')
     except Exception as e:
@@ -255,9 +255,10 @@ def main(query_url_input=None):
             search_queue.put(result)
             if is_output_csv == 'yes':
                 writer.writerow(result)
-        f.close()
+        if is_output_csv == 'yes':
+            f.close()
         threadcrawl = []
-        for i in range(int(thread_num) + 20):
+        for i in range(thread_num):
             thread = ThreadCrawl(search_queue, data_queue)
             thread.start()
             threadcrawl.append(thread)
@@ -267,7 +268,7 @@ def main(query_url_input=None):
 
         logger.info("准备执行下载操作...")
         threadparse = []
-        for i in range(int(thread_num)):
+        for i in range(thread_num):
             thread = ThreadParse(data_queue, output_csv, lock)
             thread.start()
             threadparse.append(thread)
